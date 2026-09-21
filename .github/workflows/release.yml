@@ -128,7 +128,6 @@ jobs:
       cancel-in-progress: false
     permissions:
       contents: write
-      actions: read
     env:
       ARCHIVE: ${{ needs.archive.outputs.archive }}
       RELEASE_TAG: ${{ needs.archive.outputs.tag }}

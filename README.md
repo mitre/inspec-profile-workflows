@@ -22,7 +22,7 @@ Before enabling publishing:
 - Configure **Settings → Environments → Release → Required reviewers** in each profile repository. The publishing job fails if reviewers are missing or its token cannot read the environment's protection settings.
 - Ensure the repository/organization permits the referenced workflow and actions. If this shared repository is private, configure Actions access for the callers; a public repository is needed for unrelated public callers.
 - Have a root-level `Gemfile` that installs the selected auditor and an `inspec.yml` with a filename-safe `name` and an `X.Y.Z` version.
-- Allow the caller's token `contents: write` and `actions: read`, as shown in the example. The build job explicitly uses only `contents: read`; write access is used by the publishing job. No personal access token or `secrets: inherit` is needed for public profile dependencies.
+- Keep the caller's workflow-wide permissions at `contents: read` and grant `contents: write` only to the job calling this workflow, as shown in the example. The build job explicitly uses only `contents: read`; write access is used by the publishing job. Downloading the artifact from the same run does not require `actions: read`. No personal access token or `secrets: inherit` is needed for public profile dependencies.
 - Check whether required reviewers are supported by your GitHub plan and repository visibility.
 
 For an artifact-only trial, set `publish: false` (or omit it). For an InSpec-based profile, set `auditor: inspec`; the default is `cinc-auditor`.
@@ -45,6 +45,8 @@ Update `version` in the profile's `inspec.yml` before a new release. The workflo
 The tag is created during publication, after approval. An existing tag must resolve to the build commit. An existing release is not overwritten; a rerun that reaches release creation fails if that release already exists. No tags or releases are created for pull requests.
 
 Approve the pending `Publish Approved Release` job from the profile repository's Actions run. This is approval of the existing build, not a manual dispatch that builds again. Approve before the artifact expires; an expired artifact requires a new build. Configuring reviewers is a repository setting and is not done by this workflow.
+
+While approval is pending, the build job has finished and the publishing job has not been sent to a runner. The approval wait does not consume runner execution minutes, though artifact storage continues and the 14-day retention period still applies. Unrelated workflows can continue running independently.
 
 Dependencies do not need to be committed under `vendor/`: the archive command vendors them at build time. Profiles without dependencies are supported without requiring a vendor directory. Archive validation is a structural check, not a live compliance scan or proof of offline execution.
 

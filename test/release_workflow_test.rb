@@ -46,7 +46,13 @@ run.call('safe defaults and publication gates') do
   assert(JOBS['release']['environment'] == 'Release', 'Missing environment gate')
   assert(JOBS['release']['needs'] == 'archive', 'Release must wait for the build')
   assert(JOBS['archive']['permissions'] == { 'contents' => 'read' }, 'Build must be read-only')
-  assert(JOBS['release']['permissions'] == { 'contents' => 'write', 'actions' => 'read' }, 'Release permission mismatch')
+  assert(JOBS['release']['permissions'] == { 'contents' => 'write' }, 'Release must only request contents: write')
+end
+
+run.call('caller example scopes write access to the reusable-workflow job') do
+  caller = YAML.load_file(File.expand_path('../examples/release.yml', __dir__))
+  assert(caller['permissions'] == { 'contents' => 'read' }, 'Caller defaults must be read-only')
+  assert(caller['jobs']['profile']['permissions'] == { 'contents' => 'write' }, 'Only the calling job may request write access')
 end
 
 run.call('pinned actions, caller checkout, and build-once publication') do
@@ -66,6 +72,8 @@ run.call('pinned actions, caller checkout, and build-once publication') do
   download = step('release', 'Download checked archive')
   assert(upload['with']['name'] == download['with']['name'], 'Artifact names differ')
   assert(!download['with'].key?('run-id'), 'Download must use the same workflow run')
+  assert(!download['with'].key?('github-token'), 'Same-run download must not use a GitHub API token')
+  assert(!download['with'].key?('repository'), 'Download must use the calling repository')
 end
 
 run.call('all embedded shell scripts parse') do
