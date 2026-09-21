@@ -5,8 +5,8 @@ require 'tmpdir'
 require 'fileutils'
 require 'json'
 
-WORKFLOW = YAML.load_file(File.expand_path('../.github/workflows/release.yml', __dir__))
-PUBLISH = YAML.load_file(File.expand_path('../.github/workflows/publish.yml', __dir__))
+WORKFLOW = YAML.load_file(File.expand_path('../.github/workflows/build.yml', __dir__))
+PUBLISH = YAML.load_file(File.expand_path('../.github/workflows/release.yml', __dir__))
 JOBS = WORKFLOW.fetch('jobs').merge(PUBLISH.fetch('jobs'))
 
 def assert(condition, message)
@@ -46,6 +46,10 @@ run.call('automatic builds have no publishing job or environment') do
 end
 
 run.call('manual publication validates before approval and limits permissions') do
+  trigger = PUBLISH['on'] || PUBLISH[true]
+  assert(trigger['workflow_call']['inputs']['build-workflow']['default'] == 'build.yml', 'Release must select the build workflow by default')
+  assert(WORKFLOW['name'] == 'Build Profile Archive', 'Build display name mismatch')
+  assert(PUBLISH['name'] == 'Request Profile Release', 'Release display name mismatch')
   assert(PUBLISH['jobs'].keys == ['validate', 'release'], 'Publication jobs changed')
   assert(JOBS['release']['needs'] == 'validate', 'Validate selected build before approval')
   assert(JOBS['release']['environment'] == 'Release', 'Missing environment gate')
@@ -55,8 +59,8 @@ run.call('manual publication validates before approval and limits permissions') 
 end
 
 run.call('caller examples separate automatic builds and manual publication') do
-  build = YAML.load_file(File.expand_path('../examples/release.yml', __dir__))
-  publish = YAML.load_file(File.expand_path('../examples/publish.yml', __dir__))
+  build = YAML.load_file(File.expand_path('../examples/build.yml', __dir__))
+  publish = YAML.load_file(File.expand_path('../examples/release.yml', __dir__))
   assert(build['permissions'] == { 'contents' => 'read' }, 'Build caller must be read-only')
   assert(!build['jobs']['profile'].key?('permissions'), 'Build caller must not elevate permissions')
   build_trigger = build['on'] || build[true]
@@ -64,7 +68,7 @@ run.call('caller examples separate automatic builds and manual publication') do
   publish_trigger = publish['on'] || publish[true]
   assert(publish_trigger.keys == ['workflow_dispatch'], 'Publication must only be manually triggered')
   assert(publish['jobs']['publish']['permissions'] == { 'contents' => 'write', 'actions' => 'read' }, 'Publication caller permissions changed')
-  assert(publish['jobs']['publish']['with']['build-workflow'] == 'release.yml', 'Expected caller workflow changed')
+  assert(publish['jobs']['publish']['with']['build-workflow'] == 'build.yml', 'Expected caller workflow changed')
 end
 
 run.call('pinned actions, original commit checkout, and no rebuild on publication') do
@@ -243,7 +247,7 @@ Dir.mktmpdir('publication-validation-') do |directory|
   env = {
     'GH_REPO' => 'example/profile',
     'BUILD_RUN_ID' => '123',
-    'BUILD_WORKFLOW' => 'release.yml',
+    'BUILD_WORKFLOW' => 'build.yml',
     'RELEASE_BRANCH' => 'main',
     'GITHUB_EVENT_NAME' => 'workflow_dispatch',
     'GITHUB_REF' => 'refs/heads/main',
@@ -263,7 +267,7 @@ Dir.mktmpdir('publication-validation-') do |directory|
     ['dispatch from other branch', { 'GITHUB_REF' => 'refs/heads/feature' }, false],
     ['non-numeric run ID', { 'BUILD_RUN_ID' => '../123' }, false],
     ['zero run ID', { 'BUILD_RUN_ID' => '0' }, false],
-    ['workflow path instead of filename', { 'BUILD_WORKFLOW' => '../release.yml' }, false],
+    ['workflow path instead of filename', { 'BUILD_WORKFLOW' => '../build.yml' }, false],
     ['invalid workflow extension', { 'BUILD_WORKFLOW' => 'release.txt' }, false]
   ].each do |name, changes, success|
     run.call("request validation: #{name}") do
@@ -294,7 +298,7 @@ Dir.mktmpdir('publication-validation-') do |directory|
       assert(File.read(env['GITHUB_ENV']) == (success ? "BUILD_RUN_ID=#{selected_id}\n" : ''), 'Selected run must persist for validation')
       if requested_id.empty?
         args = File.read(query_file).lines.map(&:chomp)
-        assert(args == ['api', '--method', 'GET', 'repos/example/profile/actions/workflows/release.yml/runs',
+        assert(args == ['api', '--method', 'GET', 'repos/example/profile/actions/workflows/build.yml/runs',
                         '-f', 'branch=main', '-f', 'event=push', '-f', 'status=success', '-f', 'per_page=1'], 'Latest query must filter workflow, branch, event, and success')
       else
         assert(File.read(query_file).empty?, 'Explicit run must not query latest')
@@ -310,13 +314,13 @@ Dir.mktmpdir('publication-validation-') do |directory|
   end
 
   source = {
-    'id' => 123, 'workflow_id' => 77, 'path' => '.github/workflows/release.yml',
+    'id' => 123, 'workflow_id' => 77, 'path' => '.github/workflows/build.yml',
     'repository' => { 'full_name' => 'example/profile' },
     'head_repository' => { 'full_name' => 'example/profile' },
     'event' => 'push', 'head_branch' => 'main', 'status' => 'completed', 'conclusion' => 'success',
     'head_sha' => 'a' * 40
   }
-  workflow = { 'id' => 77, 'path' => '.github/workflows/release.yml' }
+  workflow = { 'id' => 77, 'path' => '.github/workflows/build.yml' }
   artifact = { 'id' => 987, 'name' => 'release-profile', 'expired' => false,
                'workflow_run' => { 'id' => 123, 'head_sha' => 'a' * 40 } }
   stub = <<~SH

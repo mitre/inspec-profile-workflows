@@ -1,15 +1,23 @@
-name: Build Profile Archive
+name: Request Profile Release
 
 on:
-  pull_request:
-  push:
-    branches:
-      - main
+  workflow_dispatch:
+    inputs:
+      build-run-id:
+        description: Optional build run ID. Leave blank for the latest successful main push build.
+        required: false
+        type: string
 
 permissions:
   contents: read
 
 jobs:
-  profile:
-    # Replace WORKFLOW_COMMIT_SHA with a published, full 40-character commit SHA.
+  publish:
+    permissions:
+      contents: write
+      actions: read
+    # Use the same published shared-workflow commit as the automatic build caller.
     uses: mitre/inspec-profile-workflows/.github/workflows/release.yml@WORKFLOW_COMMIT_SHA
+    with:
+      build-run-id: ${{ inputs.build-run-id }}
+      build-workflow: build.yml

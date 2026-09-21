@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   test:
-    name: Test reusable release workflow
+    name: Test reusable build and release workflows
     runs-on: ubuntu-latest
     steps:
       - name: Check out workflow repository
