@@ -1,0 +1,24 @@
+name: Validate Workflows
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test reusable release workflow
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out workflow repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@a0102e0972be65f351c307e2d64b9314a57c8073  # v1.324.0
+        with:
+          ruby-version: "3.3"
+      - name: Test workflow steps
+        run: ruby test/release_workflow_test.rb

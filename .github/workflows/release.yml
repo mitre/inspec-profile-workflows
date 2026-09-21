@@ -1,0 +1,189 @@
+name: Build and Release Profile
+
+on:
+  workflow_call:
+    inputs:
+      auditor:
+        description: Bundled executable to use (cinc-auditor or inspec).
+        type: string
+        default: cinc-auditor
+      ruby-version:
+        description: Ruby version used to install the calling profile's Gemfile.
+        type: string
+        default: "3.3"
+      publish:
+        description: Enable approval-gated publishing on pushes to the release branch.
+        type: boolean
+        default: false
+      release-branch:
+        description: Branch allowed to publish releases.
+        type: string
+        default: main
+    outputs:
+      archive:
+        description: Profile archive filename.
+        value: ${{ jobs.archive.outputs.archive }}
+      tag:
+        description: Release tag derived from inspec.yml.
+        value: ${{ jobs.archive.outputs.tag }}
+
+permissions:
+  contents: read
+
+jobs:
+  archive:
+    name: Build and Validate Archive
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      archive: ${{ steps.metadata.outputs.archive }}
+      tag: ${{ steps.metadata.outputs.tag }}
+    env:
+      LC_ALL: en_US.UTF-8
+      AUDITOR: ${{ inputs.auditor }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out profile repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@a0102e0972be65f351c307e2d64b9314a57c8073  # v1.324.0
+        with:
+          ruby-version: ${{ inputs.ruby-version }}
+
+      - name: Check profile metadata
+        id: metadata
+        run: |
+          case "$AUDITOR" in
+            cinc-auditor|inspec) ;;
+            *) echo "::error::auditor must be cinc-auditor or inspec"; exit 1 ;;
+          esac
+          ruby -ryaml -e '
+            metadata = YAML.safe_load(File.read("inspec.yml"))
+            name = metadata.fetch("name").to_s
+            version = metadata.fetch("version").to_s
+            abort "Profile name must contain only letters, numbers, dots, underscores, or hyphens and start with a letter or number" unless name.match?(/\A[a-zA-Z0-9][a-zA-Z0-9._-]*\z/)
+            abort "Release version must use X.Y.Z" unless version.match?(/\A\d+\.\d+\.\d+\z/)
+            dependencies = metadata.fetch("depends", []) || []
+            abort "Profile depends must be an array" unless dependencies.is_a?(Array)
+            archive = "#{name}-#{version}.tar.gz"
+            File.open(ENV.fetch("GITHUB_ENV"), "a") { |env| env.puts "ARCHIVE=#{archive}" }
+            File.open(ENV.fetch("GITHUB_OUTPUT"), "a") do |output|
+              output.puts "archive=#{archive}"
+              output.puts "tag=v#{version}"
+              output.puts "has_dependencies=#{!dependencies.empty?}"
+            end
+          '
+
+      - name: Run Bundle Install
+        run: bundle install
+
+      - name: Installed Auditor
+        run: bundle exec "$AUDITOR" version
+
+      - name: Archive the Profile
+        # Archive vendors profile dependencies; they do not need to be committed.
+        run: |
+          mkdir -p "$RUNNER_TEMP/release"
+          bundle exec "$AUDITOR" archive . --tar --output "$RUNNER_TEMP/release/$ARCHIVE"
+
+      - name: Check the archived Profile
+        env:
+          HAS_DEPENDENCIES: ${{ steps.metadata.outputs.has_dependencies }}
+        run: |
+          bundle exec "$AUDITOR" check "$RUNNER_TEMP/release/$ARCHIVE"
+          tar -tzf "$RUNNER_TEMP/release/$ARCHIVE" > "$RUNNER_TEMP/archive-contents.txt"
+          if [ "$HAS_DEPENDENCIES" = "true" ]; then
+            grep -Eq '(^|/)inspec.lock$' "$RUNNER_TEMP/archive-contents.txt"
+            grep -Eq '(^|/)vendor/.+' "$RUNNER_TEMP/archive-contents.txt"
+          fi
+
+      - name: Generate checksum
+        run: |
+          cd "$RUNNER_TEMP/release"
+          sha256sum "$ARCHIVE" > "$ARCHIVE.sha256"
+
+      - name: Upload archive for testing
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+        with:
+          name: release-profile
+          path: ${{ runner.temp }}/release/
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish Approved Release
+    if: inputs.publish && github.event_name == 'push' && github.ref == format('refs/heads/{0}', inputs.release-branch)
+    needs: archive
+    runs-on: ubuntu-latest
+    environment: Release
+    concurrency:
+      group: publish-${{ needs.archive.outputs.tag }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      actions: read
+    env:
+      ARCHIVE: ${{ needs.archive.outputs.archive }}
+      RELEASE_TAG: ${{ needs.archive.outputs.tag }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Require configured approval protection
+        # Fail if required reviewers are missing; otherwise GitHub would run without approval.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          protected=$(gh api "repos/$GH_REPO/environments/Release" \
+            --jq 'any(.protection_rules[]?; .type == "required_reviewers" and (.reviewers | length > 0))')
+          if [ "$protected" != "true" ]; then
+            echo "::error::Configure required reviewers for the Release environment before publishing."
+            exit 1
+          fi
+
+      - name: Check out repository and tags
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check existing release tag
+        # Never attach this build to a tag for a different commit.
+        run: |
+          if git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"; then
+            tag_commit=$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")
+            if [ "$tag_commit" != "$GITHUB_SHA" ]; then
+              echo "::error::Tag $RELEASE_TAG points to a different commit. Bump version in inspec.yml."
+              exit 1
+            fi
+          fi
+
+      - name: Download checked archive
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6.0.0
+        with:
+          name: release-profile
+          path: ${{ runner.temp }}/release/
+
+      - name: Verify downloaded archive
+        run: |
+          cd "$RUNNER_TEMP/release"
+          sha256sum -c "$ARCHIVE.sha256"
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release create "$RELEASE_TAG" \
+            "$RUNNER_TEMP/release/$ARCHIVE" \
+            "$RUNNER_TEMP/release/$ARCHIVE.sha256" \
+            --target "$GITHUB_SHA" --title "$RELEASE_TAG" --generate-notes
