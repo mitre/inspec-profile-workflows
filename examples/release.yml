@@ -1,4 +1,4 @@
-name: Build and Release Profile
+name: Build Profile Archive
 
 on:
   pull_request:
@@ -11,10 +11,5 @@ permissions:
 
 jobs:
   profile:
-    # Allow publishing; the called workflow keeps the build job read-only.
-    permissions:
-      contents: write
     # Replace WORKFLOW_COMMIT_SHA with a published, full 40-character commit SHA.
     uses: mitre/inspec-profile-workflows/.github/workflows/release.yml@WORKFLOW_COMMIT_SHA
-    with:
-      publish: true

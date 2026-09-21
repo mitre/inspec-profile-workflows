@@ -1,4 +1,4 @@
-name: Build and Release Profile
+name: Build Profile Archive
 
 on:
   workflow_call:
@@ -11,14 +11,6 @@ on:
         description: Ruby version used to install the calling profile's Gemfile.
         type: string
         default: "3.3"
-      publish:
-        description: Enable approval-gated publishing on pushes to the release branch.
-        type: boolean
-        default: false
-      release-branch:
-        description: Branch allowed to publish releases.
-        type: string
-        default: main
     outputs:
       archive:
         description: Profile archive filename.
@@ -117,72 +109,13 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  release:
-    name: Publish Approved Release
-    if: inputs.publish && github.event_name == 'push' && github.ref == format('refs/heads/{0}', inputs.release-branch)
-    needs: archive
-    runs-on: ubuntu-latest
-    environment: Release
-    concurrency:
-      group: publish-${{ needs.archive.outputs.tag }}
-      cancel-in-progress: false
-    permissions:
-      contents: write
-    env:
-      ARCHIVE: ${{ needs.archive.outputs.archive }}
-      RELEASE_TAG: ${{ needs.archive.outputs.tag }}
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - name: Require configured approval protection
-        # Fail if required reviewers are missing; otherwise GitHub would run without approval.
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
+      - name: Build summary
         run: |
-          protected=$(gh api "repos/$GH_REPO/environments/Release" \
-            --jq 'any(.protection_rules[]?; .type == "required_reviewers" and (.reviewers | length > 0))')
-          if [ "$protected" != "true" ]; then
-            echo "::error::Configure required reviewers for the Release environment before publishing."
-            exit 1
-          fi
-
-      - name: Check out repository and tags
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        with:
-          ref: ${{ github.sha }}
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Check existing release tag
-        # Never attach this build to a tag for a different commit.
-        run: |
-          if git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"; then
-            tag_commit=$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")
-            if [ "$tag_commit" != "$GITHUB_SHA" ]; then
-              echo "::error::Tag $RELEASE_TAG points to a different commit. Bump version in inspec.yml."
-              exit 1
-            fi
-          fi
-
-      - name: Download checked archive
-        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6.0.0
-        with:
-          name: release-profile
-          path: ${{ runner.temp }}/release/
-
-      - name: Verify downloaded archive
-        run: |
-          cd "$RUNNER_TEMP/release"
-          sha256sum -c "$ARCHIVE.sha256"
-
-      - name: Create release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          gh release create "$RELEASE_TAG" \
-            "$RUNNER_TEMP/release/$ARCHIVE" \
-            "$RUNNER_TEMP/release/$ARCHIVE.sha256" \
-            --target "$GITHUB_SHA" --title "$RELEASE_TAG" --generate-notes
+          {
+            echo "### Profile archive"
+            echo "Archive: $ARCHIVE"
+            echo "Build run ID: $GITHUB_RUN_ID"
+            echo "Commit: $GITHUB_SHA"
+            echo "To request a release, run Publish Profile. Optionally supply this run ID to select this exact build."
+            echo "Only successful push builds from the configured release branch can be published."
+          } >> "$GITHUB_STEP_SUMMARY"
