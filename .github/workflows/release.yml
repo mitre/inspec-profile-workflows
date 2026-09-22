@@ -111,13 +111,15 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           ref: ${{ steps.source.outputs.build_sha }}
+          # Tags are needed to reject an already-used version before approval.
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Read original profile metadata
         id: metadata
         run: |
-          ruby -ryaml -e '
-            metadata = YAML.safe_load(File.read("inspec.yml"))
+          ruby -ryaml -rdate -e '
+            metadata = YAML.safe_load(File.read("inspec.yml"), permitted_classes: [Date, Time])
             name = metadata.fetch("name").to_s
             version = metadata.fetch("version").to_s
             abort "Invalid profile name" unless name.match?(/\A[a-zA-Z0-9][a-zA-Z0-9._-]*\z/)
@@ -127,6 +129,26 @@ jobs:
               output.puts "tag=v#{version}"
             end
           '
+
+      - name: Check the release tag is available
+        # Reject a used version before a reviewer is asked to approve, instead of
+        # failing on gh release create after approval. The release job repeats
+        # both checks because a tag can appear while approval is pending.
+        env:
+          RELEASE_TAG: ${{ steps.metadata.outputs.tag }}
+          BUILD_SHA: ${{ steps.source.outputs.build_sha }}
+        run: |
+          if git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"; then
+            tag_commit=$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")
+            if [ "$tag_commit" != "$BUILD_SHA" ]; then
+              echo "::error::Tag $RELEASE_TAG points to a different commit. Bump version in inspec.yml and build again."
+              exit 1
+            fi
+          fi
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "::error::Release $RELEASE_TAG already exists. Bump version in inspec.yml and build again."
+            exit 1
+          fi
 
       - name: Publication request summary
         env:

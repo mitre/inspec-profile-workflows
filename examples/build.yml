@@ -10,6 +10,6 @@ permissions:
   contents: read
 
 jobs:
-  profile:
+  build:
     # Replace WORKFLOW_COMMIT_SHA with a published, full 40-character commit SHA.
     uses: mitre/inspec-profile-workflows/.github/workflows/build.yml@WORKFLOW_COMMIT_SHA

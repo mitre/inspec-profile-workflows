@@ -4,6 +4,7 @@ require 'open3'
 require 'tmpdir'
 require 'fileutils'
 require 'json'
+require 'date'
 
 WORKFLOW = YAML.load_file(File.expand_path('../.github/workflows/build.yml', __dir__))
 PUBLISH = YAML.load_file(File.expand_path('../.github/workflows/release.yml', __dir__))
@@ -62,13 +63,18 @@ run.call('caller examples separate automatic builds and manual publication') do
   build = YAML.load_file(File.expand_path('../examples/build.yml', __dir__))
   publish = YAML.load_file(File.expand_path('../examples/release.yml', __dir__))
   assert(build['permissions'] == { 'contents' => 'read' }, 'Build caller must be read-only')
-  assert(!build['jobs']['profile'].key?('permissions'), 'Build caller must not elevate permissions')
+  # Assert the shape, not the job key: real callers name their jobs freely.
+  assert(build.fetch('jobs').size == 1, 'Build caller example must define exactly one job')
+  assert(publish.fetch('jobs').size == 1, 'Publication caller example must define exactly one job')
+  build_job = build.fetch('jobs').values.first
+  publish_job = publish.fetch('jobs').values.first
+  assert(!build_job.key?('permissions'), 'Build caller must not elevate permissions')
   build_trigger = build['on'] || build[true]
   assert(build_trigger.keys.sort == ['pull_request', 'push'], 'Build caller triggers changed')
   publish_trigger = publish['on'] || publish[true]
   assert(publish_trigger.keys == ['workflow_dispatch'], 'Publication must only be manually triggered')
-  assert(publish['jobs']['publish']['permissions'] == { 'contents' => 'write', 'actions' => 'read' }, 'Publication caller permissions changed')
-  assert(publish['jobs']['publish']['with']['build-workflow'] == 'build.yml', 'Expected caller workflow changed')
+  assert(publish_job['permissions'] == { 'contents' => 'write', 'actions' => 'read' }, 'Publication caller permissions changed')
+  assert(publish_job['with']['build-workflow'] == 'build.yml', 'Expected caller workflow changed')
 end
 
 run.call('pinned actions, original commit checkout, and no rebuild on publication') do
@@ -95,6 +101,20 @@ run.call('pinned actions, original commit checkout, and no rebuild on publicatio
   assert(download['github-token'] == '${{ github.token }}', 'Cross-run download requires a token')
   assert(download['repository'] == '${{ github.repository }}', 'Download must stay in the calling repository')
   assert(download['merge-multiple'] == true, 'Artifact must extract directly into the release directory')
+end
+
+run.call('no workflow or caller example receives secrets') do
+  # Build runs on pull_request, including from forks, and bundle install executes
+  # gem hooks from the PR's Gemfile. Keep credentials out of that blast radius.
+  paths = Dir[File.expand_path('../.github/workflows/*.yml', __dir__)] +
+          Dir[File.expand_path('../examples/*.yml', __dir__)]
+  assert(!paths.empty?, 'No workflow files found')
+  paths.each do |path|
+    content = File.read(path)
+    name = File.basename(path)
+    assert(!content.include?('secrets.'), "#{name} reads a secret")
+    assert(!content.match?(/^\s*secrets:/), "#{name} passes secrets to a reusable workflow")
+  end
 end
 
 run.call('all embedded shell scripts parse') do
@@ -137,21 +157,24 @@ Dir.mktmpdir('profile-workflow-tests-') do |directory|
 
   metadata = { 'name' => 'sample', 'version' => '1.2.3' }
   cases = [
-    ['standalone profile', metadata, 'cinc-auditor', true, false],
-    ['InSpec runtime', metadata, 'inspec', true, false],
-    ['profile with dependencies', metadata.merge('depends' => [{ 'name' => 'parent', 'url' => 'https://example.invalid/parent.tar.gz' }]), 'cinc-auditor', true, true],
-    ['empty dependencies', metadata.merge('depends' => []), 'cinc-auditor', true, false],
-    ['null dependencies', metadata.merge('depends' => nil), 'cinc-auditor', true, false],
-    ['unsafe filename', metadata.merge('name' => '../sample'), 'cinc-auditor', false, nil],
-    ['newline in name', metadata.merge('name' => "sample\nINJECTED=value"), 'cinc-auditor', false, nil],
-    ['option-like name', metadata.merge('name' => '--sample'), 'cinc-auditor', false, nil],
-    ['missing version', { 'name' => 'sample' }, 'cinc-auditor', false, nil],
-    ['invalid version', metadata.merge('version' => '1.2'), 'cinc-auditor', false, nil],
-    ['prerelease version', metadata.merge('version' => '1.2.3-rc1'), 'cinc-auditor', false, nil],
-    ['invalid dependencies', metadata.merge('depends' => 'parent'), 'cinc-auditor', false, nil],
-    ['invalid executable', metadata, 'inspec; echo injected', false, nil]
+    ['standalone profile', metadata, 'cinc-auditor', true],
+    ['InSpec runtime', metadata, 'inspec', true],
+    ['profile with dependencies', metadata.merge('depends' => [{ 'name' => 'parent', 'url' => 'https://example.invalid/parent.tar.gz' }]), 'cinc-auditor', true],
+    ['empty dependencies', metadata.merge('depends' => []), 'cinc-auditor', true],
+    ['null dependencies', metadata.merge('depends' => nil), 'cinc-auditor', true],
+    # A bare date is legal in inspec.yml and must not break the parser.
+    ['date-bearing metadata', metadata.merge('release_date' => Date.new(2024, 1, 1)), 'cinc-auditor', true],
+    ['timestamped metadata', metadata.merge('built_at' => Time.utc(2024, 1, 1, 12, 0, 0)), 'cinc-auditor', true],
+    ['unsafe filename', metadata.merge('name' => '../sample'), 'cinc-auditor', false],
+    ['newline in name', metadata.merge('name' => "sample\nINJECTED=value"), 'cinc-auditor', false],
+    ['option-like name', metadata.merge('name' => '--sample'), 'cinc-auditor', false],
+    ['missing version', { 'name' => 'sample' }, 'cinc-auditor', false],
+    ['invalid version', metadata.merge('version' => '1.2'), 'cinc-auditor', false],
+    ['prerelease version', metadata.merge('version' => '1.2.3-rc1'), 'cinc-auditor', false],
+    ['invalid dependencies', metadata.merge('depends' => 'parent'), 'cinc-auditor', false],
+    ['invalid executable', metadata, 'inspec; echo injected', false]
   ]
-  cases.each do |name, data, auditor, success, depends|
+  cases.each do |name, data, auditor, success|
     run.call("metadata: #{name}") do
       File.write(File.join(directory, 'inspec.yml'), YAML.dump(data))
       File.write(env['GITHUB_ENV'], '')
@@ -160,7 +183,7 @@ Dir.mktmpdir('profile-workflow-tests-') do |directory|
       check_success(result, success, name)
       if success
         outputs = File.read(env['GITHUB_OUTPUT'])
-        assert(outputs == "archive=sample-1.2.3.tar.gz\ntag=v1.2.3\nhas_dependencies=#{depends}\n", 'Incorrect metadata outputs')
+        assert(outputs == "archive=sample-1.2.3.tar.gz\ntag=v1.2.3\n", 'Incorrect metadata outputs')
         assert(File.read(env['GITHUB_ENV']) == "ARCHIVE=sample-1.2.3.tar.gz\n", 'Incorrect archive environment')
       else
         assert(File.read(env['GITHUB_OUTPUT']).empty?, 'Invalid input produced workflow outputs')
@@ -169,31 +192,95 @@ Dir.mktmpdir('profile-workflow-tests-') do |directory|
   end
 
   FileUtils.mkdir_p(File.join(directory, 'release'))
+
+  run.call('auditor validation failure prevents publication artifact') do
+    code = "bundle() { return 1; }\n" + script('archive', 'Check the archived Profile')
+    check_success(shell(code, env, directory), false, 'auditor failure')
+  end
+
+  # Vendored-dependency validation. The archive is the only evidence available at
+  # release time, so every dependency the lockfile resolved must appear as a real
+  # vendored profile directory named for its resolved ref.
+  ref = 'a' * 40
+  other_ref = 'b' * 40
+  git_source = 'https://example.invalid/parent.git'
+  with_depends = YAML.dump(metadata.merge('depends' => [{ 'name' => 'parent', 'git' => git_source }]))
+  standalone = YAML.dump(metadata)
+  lock_for = lambda do |name, source|
+    YAML.dump('lockfile_version' => 1, 'depends' => [{ 'name' => name, 'resolved_source' => source }])
+  end
+  git_lock = lock_for.call('parent', 'git' => git_source, 'ref' => ref)
+  profile = "name: parent\nversion: 1.0.0\n"
+
   [
-    ['no dependencies', false, false, false, true],
-    ['vendored dependencies', true, true, true, true],
-    ['missing vendor', true, true, false, false],
-    ['missing lockfile', true, false, true, false]
-  ].each do |name, depends, lock, vendor, success|
-    run.call("archive check: #{name}") do
+    ['standalone profile needs no vendor directory',
+     { 'inspec.yml' => standalone }, true],
+    ['dependency vendored under its resolved ref',
+     { 'inspec.yml' => with_depends, 'inspec.lock' => git_lock, "vendor/#{ref}/inspec.yml" => profile }, true],
+    ['url dependency vendored under its sha256',
+     { 'inspec.yml' => with_depends,
+       'inspec.lock' => lock_for.call('parent', 'url' => 'https://example.invalid/p.tar.gz', 'sha256' => ref),
+       "vendor/#{ref}/inspec.yml" => profile }, true],
+    ['path dependency fetches nothing and needs no vendor directory',
+     { 'inspec.yml' => with_depends, 'inspec.lock' => lock_for.call('parent', 'path' => '../parent') }, true],
+    ['missing lockfile',
+     { 'inspec.yml' => with_depends, "vendor/#{ref}/inspec.yml" => profile }, false],
+    ['missing vendor directory',
+     { 'inspec.yml' => with_depends, 'inspec.lock' => git_lock }, false],
+    ['vendor directory does not match the resolved ref',
+     { 'inspec.yml' => with_depends, 'inspec.lock' => git_lock, "vendor/#{other_ref}/inspec.yml" => profile }, false],
+    ['vendored directory is not a profile',
+     { 'inspec.yml' => with_depends, 'inspec.lock' => git_lock, "vendor/#{ref}/README.md" => 'not a profile' }, false],
+    # The previous structural grep accepted any path containing vendor/.
+    ['unrelated vendor path does not satisfy the check',
+     { 'inspec.yml' => with_depends, 'inspec.lock' => git_lock, 'spec/vendor/junk.txt' => 'unrelated' }, false],
+    ['lockfile resolves a different dependency',
+     { 'inspec.yml' => with_depends,
+       'inspec.lock' => lock_for.call('other', 'git' => git_source, 'ref' => ref),
+       "vendor/#{ref}/inspec.yml" => profile }, false],
+    ['lockfile resolves nothing',
+     { 'inspec.yml' => with_depends, 'inspec.lock' => YAML.dump('lockfile_version' => 1, 'depends' => []) }, false],
+    ['dependency without a resolved source',
+     { 'inspec.yml' => with_depends,
+       'inspec.lock' => YAML.dump('lockfile_version' => 1, 'depends' => [{ 'name' => 'parent' }]),
+       "vendor/#{ref}/inspec.yml" => profile }, false],
+    ['remote dependency resolved without a ref',
+     { 'inspec.yml' => with_depends, 'inspec.lock' => lock_for.call('parent', 'git' => git_source) }, false]
+  ].each do |name, layout, success|
+    run.call("vendor check: #{name}") do
       Dir.mktmpdir('archive-fixture-') do |fixture|
-        File.write(File.join(fixture, 'inspec.yml'), YAML.dump(metadata))
-        File.write(File.join(fixture, 'inspec.lock'), 'fixture lock') if lock
-        if vendor
-          FileUtils.mkdir_p(File.join(fixture, 'vendor', 'parent'))
-          File.write(File.join(fixture, 'vendor', 'parent', 'inspec.yml'), 'name: parent')
+        layout.each do |path, content|
+          full = File.join(fixture, path)
+          FileUtils.mkdir_p(File.dirname(full))
+          File.write(full, content)
         end
         _, err, status = Open3.capture3('tar', '-czf', File.join(directory, 'release', env['ARCHIVE']), '-C', fixture, '.')
         assert(status.success?, err)
       end
-      code = "bundle() { return 0; }\n" + script('archive', 'Check the archived Profile')
-      check_success(shell(code, env.merge('HAS_DEPENDENCIES' => depends.to_s), directory), success, name)
+      result = shell(script('archive', 'Check vendored dependencies match the lockfile'),
+                     env.merge('ARCHIVE_ROOT' => File.join(directory, 'archive-check')), directory)
+      check_success(result, success, name)
     end
   end
 
-  run.call('auditor validation failure prevents publication artifact') do
-    code = "bundle() { return 1; }\n" + script('archive', 'Check the archived Profile')
-    check_success(shell(code, env.merge('HAS_DEPENDENCIES' => 'false'), directory), false, 'auditor failure')
+  run.call('offline verification blackholes egress and isolates the vendor cache') do
+    offline = step('archive', 'Verify the archive resolves offline')
+    proxies = offline.fetch('env')
+    %w[HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy].each do |key|
+      assert(proxies[key] == 'http://127.0.0.1:9', "#{key} must be blackholed during offline verification")
+    end
+    assert(proxies['no_proxy'] == '', 'no_proxy must not exempt any host from the blackhole')
+    stdout, stderr, status = shell("bundle() { printf '%s\\n' \"$@\"; }\n" + offline.fetch('run'), env, directory)
+    assert(status.success?, stderr)
+    cache = File.join(directory, 'offline-cache')
+    expected = ['exec', 'cinc-auditor', 'check', '--vendor-cache', cache, File.join(directory, 'release', env['ARCHIVE'])]
+    assert(stdout.lines.map(&:chomp) == expected, "Unexpected offline check invocation: #{stdout}")
+    assert(Dir.children(cache).empty?, 'Offline verification must start from an empty vendor cache')
+  end
+
+  run.call('offline verification failure fails the build') do
+    code = "bundle() { return 1; }\n" + script('archive', 'Verify the archive resolves offline')
+    check_success(shell(code, env, directory), false, 'offline resolution failure')
   end
 
   run.call('checksum round-trip and tamper detection') do
@@ -379,6 +466,31 @@ Dir.mktmpdir('publication-validation-') do |directory|
     File.write(env['GITHUB_OUTPUT'], '')
     check_success(shell(script('validate', 'Read original profile metadata'), env, directory), true, 'original metadata')
     assert(File.read(env['GITHUB_OUTPUT']) == "archive=older-profile-1.2.3.tar.gz\ntag=v1.2.3\n", 'Incorrect original build metadata')
+  end
+
+  # A used version must be rejected before a reviewer is asked to approve it.
+  guard = <<~SH
+    git() {
+      case "$1" in
+        show-ref) return "$TAG_STATUS" ;;
+        rev-parse) printf '%s\\n' "$TAG_COMMIT" ;;
+        *) return 99 ;;
+      esac
+    }
+    gh() { return "$RELEASE_STATUS"; }
+  SH
+  [
+    ['tag and release are both free', '1', 'abc', '1', true],
+    ['tag already points at this build', '0', 'abc', '1', true],
+    ['tag points at another commit', '0', 'def', '1', false],
+    ['release already published', '1', 'abc', '0', false]
+  ].each do |name, tag_status, tag_commit, release_status, success|
+    run.call("pre-approval tag guard: #{name}") do
+      result = shell(guard + script('validate', 'Check the release tag is available'),
+                     env.merge('RELEASE_TAG' => 'v1.2.3', 'BUILD_SHA' => 'abc', 'TAG_STATUS' => tag_status,
+                               'TAG_COMMIT' => tag_commit, 'RELEASE_STATUS' => release_status), directory)
+      check_success(result, success, name)
+    end
   end
 end
 
