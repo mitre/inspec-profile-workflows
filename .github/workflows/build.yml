@@ -144,10 +144,10 @@ jobs:
           HTTP_PROXY: http://127.0.0.1:9
           HTTPS_PROXY: http://127.0.0.1:9
           ALL_PROXY: http://127.0.0.1:9
-          http_proxy: http://127.0.0.1:9
-          https_proxy: http://127.0.0.1:9
-          no_proxy: ""
+          NO_PROXY: ""
         run: |
+          # GitHub treats env keys case-insensitively; set lowercase aliases in Bash.
+          export http_proxy="$HTTP_PROXY" https_proxy="$HTTPS_PROXY" all_proxy="$ALL_PROXY" no_proxy="$NO_PROXY"
           rm -rf "$RUNNER_TEMP/offline-cache"
           mkdir -p "$RUNNER_TEMP/offline-cache"
           bundle exec "$AUDITOR" check \

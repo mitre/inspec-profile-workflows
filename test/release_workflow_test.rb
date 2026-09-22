@@ -46,6 +46,21 @@ run.call('automatic builds have no publishing job or environment') do
   assert(!trigger['workflow_call']['inputs'].key?('publish'), 'Build must not have a publish switch')
 end
 
+run.call('workflow environment keys are unique ignoring case') do
+  Dir[File.expand_path('../.github/workflows/*.yml', __dir__)].each do |path|
+    workflow = YAML.load_file(path)
+    scopes = [workflow]
+    workflow.fetch('jobs', {}).each_value do |job|
+      scopes << job
+      scopes.concat(job.fetch('steps', []))
+    end
+    scopes.each do |scope|
+      keys = scope.fetch('env', {}).keys.map(&:downcase)
+      assert(keys.uniq.length == keys.length, "Case-insensitive duplicate env keys in #{path}")
+    end
+  end
+end
+
 run.call('manual publication validates before approval and limits permissions') do
   trigger = PUBLISH['on'] || PUBLISH[true]
   assert(trigger['workflow_call']['inputs']['build-workflow']['default'] == 'build.yml', 'Release must select the build workflow by default')
@@ -266,11 +281,22 @@ Dir.mktmpdir('profile-workflow-tests-') do |directory|
   run.call('offline verification blackholes egress and isolates the vendor cache') do
     offline = step('archive', 'Verify the archive resolves offline')
     proxies = offline.fetch('env')
-    %w[HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy].each do |key|
+    %w[HTTP_PROXY HTTPS_PROXY ALL_PROXY].each do |key|
       assert(proxies[key] == 'http://127.0.0.1:9', "#{key} must be blackholed during offline verification")
     end
-    assert(proxies['no_proxy'] == '', 'no_proxy must not exempt any host from the blackhole')
-    stdout, stderr, status = shell("bundle() { printf '%s\\n' \"$@\"; }\n" + offline.fetch('run'), env, directory)
+    assert(proxies['NO_PROXY'] == '', 'NO_PROXY must not exempt any host from the blackhole')
+    stub = <<~SH
+      bundle() {
+        for key in HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy; do
+          [ "$(printenv "$key")" = 'http://127.0.0.1:9' ] || return 3
+        done
+        [ -z "$(printenv NO_PROXY)" ] && [ -z "$(printenv no_proxy)" ] || return 4
+        printf '%s\\n' "$@"
+      }
+    SH
+    inherited = { 'http_proxy' => 'http://old-proxy', 'https_proxy' => 'http://old-proxy',
+                  'all_proxy' => 'http://old-proxy', 'no_proxy' => 'example.com', 'NO_PROXY' => 'example.com' }
+    stdout, stderr, status = shell(stub + offline.fetch('run'), env.merge(inherited).merge(proxies), directory)
     assert(status.success?, stderr)
     cache = File.join(directory, 'offline-cache')
     expected = ['exec', 'cinc-auditor', 'check', '--vendor-cache', cache, File.join(directory, 'release', env['ARCHIVE'])]
@@ -280,7 +306,7 @@ Dir.mktmpdir('profile-workflow-tests-') do |directory|
 
   run.call('offline verification failure fails the build') do
     code = "bundle() { return 1; }\n" + script('archive', 'Verify the archive resolves offline')
-    check_success(shell(code, env, directory), false, 'offline resolution failure')
+    check_success(shell(code, env.merge(step('archive', 'Verify the archive resolves offline').fetch('env')), directory), false, 'offline resolution failure')
   end
 
   run.call('checksum round-trip and tamper detection') do
