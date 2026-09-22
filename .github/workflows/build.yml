@@ -56,8 +56,10 @@ jobs:
             cinc-auditor|inspec) ;;
             *) echo "::error::auditor must be cinc-auditor or inspec"; exit 1 ;;
           esac
-          ruby -ryaml -e '
-            metadata = YAML.safe_load(File.read("inspec.yml"))
+          ruby -ryaml -rdate -e '
+            # permitted_classes: an inspec.yml may carry a bare date (release_date,
+            # copyright year written unquoted); safe_load raises on it otherwise.
+            metadata = YAML.safe_load(File.read("inspec.yml"), permitted_classes: [Date, Time])
             name = metadata.fetch("name").to_s
             version = metadata.fetch("version").to_s
             abort "Profile name must contain only letters, numbers, dots, underscores, or hyphens and start with a letter or number" unless name.match?(/\A[a-zA-Z0-9][a-zA-Z0-9._-]*\z/)
@@ -69,7 +71,6 @@ jobs:
             File.open(ENV.fetch("GITHUB_OUTPUT"), "a") do |output|
               output.puts "archive=#{archive}"
               output.puts "tag=v#{version}"
-              output.puts "has_dependencies=#{!dependencies.empty?}"
             end
           '
 
@@ -86,15 +87,72 @@ jobs:
           bundle exec "$AUDITOR" archive . --tar --output "$RUNNER_TEMP/release/$ARCHIVE"
 
       - name: Check the archived Profile
-        env:
-          HAS_DEPENDENCIES: ${{ steps.metadata.outputs.has_dependencies }}
         run: |
           bundle exec "$AUDITOR" check "$RUNNER_TEMP/release/$ARCHIVE"
-          tar -tzf "$RUNNER_TEMP/release/$ARCHIVE" > "$RUNNER_TEMP/archive-contents.txt"
-          if [ "$HAS_DEPENDENCIES" = "true" ]; then
-            grep -Eq '(^|/)inspec.lock$' "$RUNNER_TEMP/archive-contents.txt"
-            grep -Eq '(^|/)vendor/.+' "$RUNNER_TEMP/archive-contents.txt"
-          fi
+
+      - name: Check vendored dependencies match the lockfile
+        # Presence of a vendor/ path proves nothing: it is satisfied by any
+        # unrelated path such as spec/vendor/. Cross-check every dependency the
+        # lockfile resolved against a real vendored profile directory.
+        env:
+          ARCHIVE_ROOT: ${{ runner.temp }}/archive-check
+        run: |
+          rm -rf "$ARCHIVE_ROOT"
+          mkdir -p "$ARCHIVE_ROOT"
+          tar -xzf "$RUNNER_TEMP/release/$ARCHIVE" -C "$ARCHIVE_ROOT"
+          ruby -ryaml -rdate -e '
+            root = ENV.fetch("ARCHIVE_ROOT")
+            permitted = { permitted_classes: [Date, Time] }
+            metadata = YAML.safe_load(File.read(File.join(root, "inspec.yml")), **permitted)
+            declared = metadata.fetch("depends", []) || []
+            abort "Profile depends must be an array" unless declared.is_a?(Array)
+            if declared.empty?
+              puts "No dependencies declared; nothing to vendor."
+              exit
+            end
+            lockfile = File.join(root, "inspec.lock")
+            abort "Archive has no inspec.lock; dependencies were not vendored" unless File.file?(lockfile)
+            lock = YAML.safe_load(File.read(lockfile), **permitted)
+            resolved = lock.is_a?(Hash) ? (lock.fetch("depends", []) || []) : []
+            abort "inspec.lock resolved no dependencies" unless resolved.is_a?(Array) && !resolved.empty?
+            declared_names = declared.map { |entry| entry["name"].to_s }.sort
+            resolved_names = resolved.map { |entry| entry["name"].to_s }.sort
+            abort "inspec.lock resolves #{resolved_names.inspect} but inspec.yml declares #{declared_names.inspect}" unless declared_names == resolved_names
+            resolved.each do |dependency|
+              name = dependency["name"].to_s
+              source = dependency["resolved_source"]
+              abort "Dependency #{name} has no resolved_source in inspec.lock" unless source.is_a?(Hash)
+              key = (source["ref"] || source["sha256"]).to_s
+              if key.empty?
+                # A path dependency resolves on disk and fetches nothing.
+                abort "Dependency #{name} resolved without a ref or sha256" unless source.key?("path")
+                puts "Dependency #{name} is a local path; nothing to vendor."
+                next
+              end
+              vendored = File.join(root, "vendor", key)
+              abort "Dependency #{name} resolved to #{key} but vendor/#{key}/ is not in the archive" unless File.directory?(vendored)
+              abort "vendor/#{key}/ has no inspec.yml; it is not a vendored profile" unless File.file?(File.join(vendored, "inspec.yml"))
+              puts "Vendored #{name} -> vendor/#{key}"
+            end
+          '
+
+      - name: Verify the archive resolves offline
+        # Structural checks cannot prove air-gapped use. Blackhole egress and
+        # point the vendor cache at an empty directory so resolution can fall
+        # back neither to the network nor to the cache the archive step filled.
+        env:
+          HTTP_PROXY: http://127.0.0.1:9
+          HTTPS_PROXY: http://127.0.0.1:9
+          ALL_PROXY: http://127.0.0.1:9
+          http_proxy: http://127.0.0.1:9
+          https_proxy: http://127.0.0.1:9
+          no_proxy: ""
+        run: |
+          rm -rf "$RUNNER_TEMP/offline-cache"
+          mkdir -p "$RUNNER_TEMP/offline-cache"
+          bundle exec "$AUDITOR" check \
+            --vendor-cache "$RUNNER_TEMP/offline-cache" \
+            "$RUNNER_TEMP/release/$ARCHIVE"
 
       - name: Generate checksum
         run: |

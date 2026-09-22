@@ -4,9 +4,9 @@ Reusable GitHub Actions workflows for building InSpec/CINC-Auditor profile archi
 
 ## How it works
 
-- **Build Profile Archive** runs on pull requests and pushes to `main`. It checks out the calling profile, installs its Gemfile, archives and validates the profile, and uploads the archive plus SHA-256 checksum as `release-profile`. It finishes without requesting release approval.
+- **Build Profile Archive** runs on pull requests and pushes to `main`. It checks out the calling profile, installs its Gemfile, archives the profile, validates it, cross-checks the vendored dependencies against the lockfile, verifies the archive resolves with no network access, and uploads the archive plus SHA-256 checksum as `release-profile`. It finishes without requesting release approval.
 - **Request Profile Release** runs only when someone clicks **Run workflow**. By default, it selects the latest successful push build of the configured workflow on `main`. An optional build run ID selects an older build instead.
-- The publication request validates the source run and artifact, displays the selected commit/run/tag, and then waits for approval in the calling repository's `Release` environment.
+- The publication request validates the source run and artifact, confirms the release tag is still available, displays the selected commit/run/tag, and then waits for approval in the calling repository's `Release` environment.
 - After approval, it downloads that exact artifact, verifies its checksum, and creates the release/tag at the **original build commit**. Nothing is rebuilt.
 
 The selected run and immutable artifact ID are fixed before approval. A newer build finishing during review cannot replace the selected archive. “Latest successful” may be older than the newest commit if newer builds failed or are still running; review the selected run shown in the publication summary.
@@ -22,6 +22,8 @@ The selected run and immutable artifact ID are fixed before approval. A newer bu
 Each profile needs a root-level `Gemfile` installing the selected auditor and an `inspec.yml` with a filename-safe `name` and an `X.Y.Z` version. Configure **Settings → Environments → Release → Required reviewers** in each profile repository. The publishing job fails if reviewers are missing or its token cannot read the protection settings.
 
 The automatic build caller is read-only. The manual publishing caller grants `contents: write` and `actions: read` only to its calling job. The reusable workflow narrows preflight validation to read-only permissions. Cross-run artifact lookup/download now requires `actions: read`; no personal access token or `secrets: inherit` is needed for public dependencies.
+
+The build runs on `pull_request`, including pull requests from forks, and `bundle install` executes install hooks from the Gemfile on the proposed branch. Treat a build runner as untrusted: never pass `secrets: inherit` or an individual secret to the build caller, and do not add steps that need credentials. A regression test asserts that no workflow or example reads a secret or forwards one to a reusable workflow. A profile that genuinely needs credentials to resolve private dependencies should build them in a separate, non-fork-triggered workflow.
 
 Ensure repository/organization settings permit these shared workflows and their pinned actions. Private shared repositories need appropriate Actions access; unrelated public callers need a public shared repository. Required-reviewer availability depends on the repository visibility and GitHub plan.
 
@@ -45,7 +47,7 @@ Changing workflows does not cancel older runs already waiting for approval. Canc
 4. Review the selected build link, original commit, and release tag in the publication request's summary.
 5. Approve the pending `Release` job.
 
-The request fails before approval if the selected run is from another repository/workflow, is not a successful completed push on the release branch, or does not have exactly one unexpired `release-profile` artifact belonging to that commit. It does not silently fall back to an older build if the selected artifact is missing or expired.
+The request fails before approval if the selected run is from another repository/workflow, is not a successful completed push on the release branch, does not have exactly one unexpired `release-profile` artifact belonging to that commit, or targets a version whose tag already points elsewhere or whose release already exists. It does not silently fall back to an older build if the selected artifact is missing or expired. The publishing job repeats the tag check after approval, because a tag can appear while the request is waiting.
 
 Preflight validation briefly uses a runner. While the subsequent approval is pending, the publishing job has not been sent to a runner, so no runner executes for that waiting job. Unrelated workflows may continue independently. Artifacts are retained for **14 days**, including time spent waiting; an expired artifact requires a new build.
 
@@ -76,7 +78,11 @@ Bump `version` in the profile's `inspec.yml` and build again before publishing a
 
 The workflow commit SHA identifies the automation implementation; the build commit SHA identifies the profile source; the archive SHA-256 checksum identifies the asset contents. Publishing an older build never tags the manual request's newer commit.
 
-The archive command vendors profile dependencies at build time; they do not need to be committed. Profiles without dependencies do not need a vendor directory. Archive validation is structural, not a live compliance scan or proof of offline execution.
+The archive command vendors profile dependencies at build time; they do not need to be committed. Profiles without dependencies do not need a vendor directory.
+
+Archive validation goes beyond checking that a `vendor/` path exists. The build reads the archived `inspec.lock`, requires the resolved dependency names to match those declared in `inspec.yml`, and requires each resolved dependency to appear as a real vendored profile directory named for its resolved `ref` (or `sha256`) and containing an `inspec.yml`. Dependencies resolved to a local path fetch nothing and are exempt.
+
+The build then re-runs the profile check against the archive with every proxy variable pointed at a blackhole and `--vendor-cache` aimed at an empty directory, so resolution can fall back neither to the network nor to the cache the archive step filled. A profile whose dependencies did not vendor fails this step instead of shipping. This validates dependency resolution, not a live compliance scan: it proves the archive needs no network to load, not that its controls pass on any given target.
 
 The archive includes profile dependencies, **not** the InSpec/CINC runtime or its Ruby gems. Air-gapped runners need those installed separately, including any custom InSpec fork. Private dependencies and licensed runtimes need their own authorized setup; these workflows do not provision credentials or licenses.
 
